@@ -1,6 +1,8 @@
 {
-  lib,
+  copyDesktopItems,
   fetchFromGitHub,
+  lib,
+  makeDesktopItem,
   python3,
 }:
 
@@ -36,6 +38,10 @@ python3.pkgs.buildPythonApplication rec {
       ${src}/angrmanagement/resources/images/angr_256x256.png \
       $out/share/icons/hicolor/256x256/apps/angr-management.png
   '';
+
+  nativeBuildInputs = [
+    copyDesktopItems
+  ];
 
   dependencies =
     with python3.pkgs;
