@@ -1,0 +1,213 @@
+name: nixpkgs-review-repro
+run-name: "nixpkgs-review repro #${{ inputs.pr }}${{ inputs.extra-args && format(' ({0})', inputs.extra-args) || '' }}"
+
+permissions: {}
+
+env:
+  PR_NUMBER: ${{ inputs.pr }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull Request Number"
+        required: true
+        type: string
+      x86_64-linux:
+        description: "Run on x86_64-linux"
+        required: true
+        type: boolean
+        default: false
+      aarch64-linux:
+        description: "Run on aarch64-linux"
+        required: true
+        type: boolean
+        default: true
+      x86_64-darwin:
+        description: "Run on x86_64-darwin"
+        required: true
+        type: choice
+        default: "no"
+        options:
+          - "no"
+          - yes_sandbox_false
+          - yes_sandbox_relaxed
+          - yes_sandbox_true
+      aarch64-darwin:
+        description: "Run on aarch64-darwin"
+        required: true
+        type: choice
+        default: "no"
+        options:
+          - "no"
+          - yes_sandbox_false
+          - yes_sandbox_relaxed
+          - yes_sandbox_true
+      extra-args:
+        description: "nixpkgs-review extra args"
+        required: false
+        type: string
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      pr: ${{ steps.pr.outputs.pr }}
+      head: ${{ steps.pr.outputs.head }}
+      merge: ${{ steps.pr.outputs.merge }}
+
+    steps:
+      - name: display inputs
+        run: echo "$INPUTS"
+        env:
+          INPUTS: "${{ toJSON(github.event.inputs) }}"
+
+      - name: get pr
+        id: pr
+        run: |
+          while true; do
+            pr="$(gh api "/repos/NixOS/nixpkgs/pulls/$PR_NUMBER")"
+            jq -e '.mergeable_state == "unknown" and (.merged | not)' <<< "$pr" > /dev/null || break
+            echo "mergeable state not known yet, retrying..."
+            sleep 2
+          done
+          jq <<< "$pr"
+          if [[ "$(jq '.merged or .mergeable' <<< "$pr")" != "true" ]]; then
+            echo "::error::PR is not mergeable"
+            exit 1
+          fi
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "head=$(jq -r '.head.sha' <<< "$pr")" >> "$GITHUB_OUTPUT"
+          echo "merge=$(jq -r '.merge_commit_sha' <<< "$pr")" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  review:
+    needs: [prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        system:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-darwin
+          - aarch64-darwin
+        exclude:
+          - system: ${{ !inputs.x86_64-linux && 'x86_64-linux' || '' }}
+          - system: ${{ !inputs.aarch64-linux && 'aarch64-linux' || '' }}
+          - system: ${{ inputs.x86_64-darwin == 'no' && 'x86_64-darwin' || '' }}
+          - system: ${{ inputs.aarch64-darwin == 'no' && 'aarch64-darwin' || '' }}
+    runs-on: >-
+      ${{ (matrix.system == 'x86_64-linux' && 'ubuntu-latest')
+      || (matrix.system == 'aarch64-linux' && 'ubuntu-24.04-arm')
+      || (matrix.system == 'x86_64-darwin' && 'macos-latest')
+      || (matrix.system == 'aarch64-darwin' && 'macos-latest') }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            .github/actions
+            flake.lock
+            flake.nix
+
+      - name: setup nix
+        uses: ./.github/actions/setup-nix
+        with:
+          extra-nix-config: ${{ vars.EXTRA_NIX_CONFIG }}
+          system: ${{ matrix.system }}
+          sandbox: ${{
+            (matrix.system == 'x86_64-darwin' && inputs.x86_64-darwin == 'yes_sandbox_false'
+            || matrix.system == 'aarch64-darwin' && inputs.aarch64-darwin == 'yes_sandbox_false') && 'false'
+            || (matrix.system == 'x86_64-darwin' && inputs.x86_64-darwin == 'yes_sandbox_relaxed'
+            || matrix.system == 'aarch64-darwin' && inputs.aarch64-darwin == 'yes_sandbox_relaxed') && 'relaxed'
+            || 'true' }}
+
+      - name: install packages
+        run: nix profile add .#coreutils .#nixpkgs-review .#jq .#gnused
+
+      - name: clone nixpkgs
+        uses: actions/checkout@v6
+        with:
+          repository: NixOS/nixpkgs
+          path: nixpkgs
+          persist-credentials: false
+
+      - name: run nixpkgs-review ${{ inputs.extra-args }}
+        run: |
+          nixpkgs-review -- \
+            pr ${PR_NUMBER} \
+            --no-shell \
+            --no-exit-status \
+            --no-headers \
+            --print-result \
+            --build-args="-L" \
+            --pr-json="$PR_JSON" \
+            $EXTRA_ARGS
+        working-directory: nixpkgs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EXTRA_ARGS: ${{ inputs.extra-args }}
+          PR_JSON: ${{ needs.prepare.outputs.pr }}
+
+      - name: generate report
+        run: |
+          dir=~/.cache/nixpkgs-review/pr-${PR_NUMBER}
+          if [[ "$OS" != "Linux" ]]; then
+            sandbox=$(nix config show sandbox)
+            sed -i '/^###/s/$/ (sandbox = '"$sandbox"')/' "$dir/report.md"
+          fi
+          if ! [[ -s "$dir/report.md" ]]; then
+            echo -e "\n---" >> "$dir/report.md"
+            echo "### \`${{ matrix.system }}\`" >> "$dir/report.md"
+            echo ":white_check_mark: *No rebuilds*" >> "$dir/report.md"
+          fi
+          cat "$dir/report.md"
+          jq -c '.+{$md}' "$dir/report.json" \
+            --rawfile md "$dir/report.md" \
+            > "report_${{ matrix.system }}.json"
+        env:
+          OS: ${{ runner.os }}
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: report_${{ matrix.system }}.json
+          path: report_${{ matrix.system }}.json
+          if-no-files-found: error
+
+  report:
+    runs-on: ubuntu-latest
+    needs: [prepare, review]
+
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          merge-multiple: true
+
+      - name: generate report
+        run: |
+          systems=(x86_64-linux aarch64-linux x86_64-darwin aarch64-darwin)
+
+          echo -e "## \`nixpkgs-review\` result\n" >> report.md
+          echo -e "Command: \`nixpkgs-review pr ${PR_NUMBER}${EXTRA_ARGS:+ $EXTRA_ARGS}\`" >> report.md
+          echo -e "Commit: [\`$HEAD\`](https://github.com/NixOS/nixpkgs/commit/$HEAD) ([subsequent changes](https://github.com/NixOS/nixpkgs/compare/$HEAD..pull/$PR_NUMBER/head))" >> report.md
+          echo -e "Merge: [\`$MERGE\`](https://github.com/NixOS/nixpkgs/commit/$MERGE)\n" >> report.md
+          echo -e "Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n" >> report.md
+
+          for system in "${systems[@]}"; do
+            [[ -s "report_${system}.json" ]] || continue
+            jq -j '.md' "report_${system}.json" >> report.md
+          done
+
+          cat report.md
+          sed '1s|$| for [#'"$PR_NUMBER"'](https://github.com/NixOS/nixpkgs/pull/'"$PR_NUMBER"')|' report.md >> "$GITHUB_STEP_SUMMARY"
+        env:
+          HEAD: ${{ needs.prepare.outputs.head }}
+          MERGE: ${{ needs.prepare.outputs.merge }}
+          EXTRA_ARGS: ${{ inputs.extra-args }}
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: report.md
+          path: report.md
+          if-no-files-found: error
