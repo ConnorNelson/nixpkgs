@@ -135,7 +135,7 @@ jobs:
             || 'true' }}
 
       - name: install packages
-        run: nix profile add .#coreutils .#nixpkgs-review .#jq .#gnused
+        run: nix profile add nixpkgs#coreutils nixpkgs#nixpkgs-review nixpkgs#jq nixpkgs#gnused
 
       - name: clone nixpkgs
         uses: actions/checkout@v6
