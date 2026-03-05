@@ -1,12 +1,23 @@
 name: nixpkgs-review-repro
-run-name: "nixpkgs-review repro #${{ inputs.pr }}${{ inputs.extra-args && format(' ({0})', inputs.extra-args) || '' }}"
+run-name: >-
+  ${{
+    github.event_name == 'workflow_dispatch'
+    && format('nixpkgs-review repro #{0}{1}', inputs.pr, inputs.extra-args && format(' ({0})', inputs.extra-args) || '')
+    || 'nixpkgs-review repro #486785 (push)'
+  }}
 
 permissions: {}
 
 env:
-  PR_NUMBER: ${{ inputs.pr }}
+  PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.pr || '486785' }}
 
 on:
+  push:
+    branches:
+      - codex/nixpkgs-review-repro
+    paths:
+      - ".github/actions/setup-nix/action.yml"
+      - ".github/workflows/nixpkgs-review-repro.yml"
   workflow_dispatch:
     inputs:
       pr:
@@ -93,10 +104,10 @@ jobs:
           - x86_64-darwin
           - aarch64-darwin
         exclude:
-          - system: ${{ !inputs.x86_64-linux && 'x86_64-linux' || '' }}
-          - system: ${{ !inputs.aarch64-linux && 'aarch64-linux' || '' }}
-          - system: ${{ inputs.x86_64-darwin == 'no' && 'x86_64-darwin' || '' }}
-          - system: ${{ inputs.aarch64-darwin == 'no' && 'aarch64-darwin' || '' }}
+          - system: ${{ (github.event_name == 'push' || !inputs.x86_64-linux) && 'x86_64-linux' || '' }}
+          - system: ${{ (github.event_name != 'push' && !inputs.aarch64-linux) && 'aarch64-linux' || '' }}
+          - system: ${{ (github.event_name == 'push' || inputs.x86_64-darwin == 'no') && 'x86_64-darwin' || '' }}
+          - system: ${{ (github.event_name == 'push' || inputs.aarch64-darwin == 'no') && 'aarch64-darwin' || '' }}
     runs-on: >-
       ${{ (matrix.system == 'x86_64-linux' && 'ubuntu-latest')
       || (matrix.system == 'aarch64-linux' && 'ubuntu-24.04-arm')
@@ -147,7 +158,7 @@ jobs:
         working-directory: nixpkgs
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          EXTRA_ARGS: ${{ inputs.extra-args }}
+          EXTRA_ARGS: ${{ github.event_name == 'workflow_dispatch' && inputs.extra-args || '' }}
           PR_JSON: ${{ needs.prepare.outputs.pr }}
 
       - name: generate report
@@ -204,7 +215,7 @@ jobs:
         env:
           HEAD: ${{ needs.prepare.outputs.head }}
           MERGE: ${{ needs.prepare.outputs.merge }}
-          EXTRA_ARGS: ${{ inputs.extra-args }}
+          EXTRA_ARGS: ${{ github.event_name == 'workflow_dispatch' && inputs.extra-args || '' }}
 
       - uses: actions/upload-artifact@v6
         with:
