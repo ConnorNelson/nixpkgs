@@ -30,12 +30,29 @@ runs:
         df -h /mnt || true
         echo "::endgroup::"
 
-        if ! sudo swapon --show | grep -q '/mnt/nixpkgs-review.swap'; then
-          sudo fallocate -l 16G /mnt/nixpkgs-review.swap || \
-            sudo dd if=/dev/zero of=/mnt/nixpkgs-review.swap bs=1M count=16384 status=progress
-          sudo chmod 600 /mnt/nixpkgs-review.swap
-          sudo mkswap /mnt/nixpkgs-review.swap
-          sudo swapon /mnt/nixpkgs-review.swap
+        swap_ready=0
+
+        # Prefer zram so we do not exhaust the runner's root filesystem.
+        if sudo modprobe zram && [ -e /dev/zram0 ]; then
+          echo lz4 | sudo tee /sys/block/zram0/comp_algorithm >/dev/null || true
+          echo 16G | sudo tee /sys/block/zram0/disksize >/dev/null
+          sudo mkswap /dev/zram0
+          sudo swapon /dev/zram0
+          swap_ready=1
+        fi
+
+        # Fall back to a conservative file-backed swap if /mnt has room.
+        if [ "$swap_ready" -eq 0 ] && ! sudo swapon --show | grep -q '/mnt/nixpkgs-review.swap'; then
+          avail_mb=$(df --output=avail -m /mnt 2>/dev/null | awk 'NR==2 { print $1 }')
+          if [ -n "$avail_mb" ] && [ "$avail_mb" -gt 6144 ]; then
+            swap_mb=$(( avail_mb > 12288 ? 8192 : avail_mb - 2048 ))
+            sudo fallocate -l "${swap_mb}M" /mnt/nixpkgs-review.swap || \
+              sudo dd if=/dev/zero of=/mnt/nixpkgs-review.swap bs=1M count="$swap_mb" status=progress
+            sudo chmod 600 /mnt/nixpkgs-review.swap
+            sudo mkswap /mnt/nixpkgs-review.swap
+            sudo swapon /mnt/nixpkgs-review.swap
+            swap_ready=1
+          fi
         fi
 
         echo "::group::memory (after)"
