@@ -111,8 +111,8 @@ jobs:
     runs-on: >-
       ${{ (matrix.system == 'x86_64-linux' && 'ubuntu-latest')
       || (matrix.system == 'aarch64-linux' && 'ubuntu-24.04-arm')
-      || (matrix.system == 'x86_64-darwin' && 'macos-latest')
-      || (matrix.system == 'aarch64-darwin' && 'macos-latest') }}
+      || (matrix.system == 'x86_64-darwin' && 'macos-15-intel')
+      || (matrix.system == 'aarch64-darwin' && 'macos-15-arm64') }}
 
     steps:
       - uses: actions/checkout@v6

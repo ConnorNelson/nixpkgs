@@ -20,6 +20,29 @@ runs:
       with:
         hatchet-protocol: rampage
 
+    - name: configure swap (linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        echo "::group::memory (before)"
+        free -h || true
+        swapon --show || true
+        df -h /mnt || true
+        echo "::endgroup::"
+
+        if ! sudo swapon --show | grep -q '/mnt/nixpkgs-review.swap'; then
+          sudo fallocate -l 16G /mnt/nixpkgs-review.swap || \
+            sudo dd if=/dev/zero of=/mnt/nixpkgs-review.swap bs=1M count=16384 status=progress
+          sudo chmod 600 /mnt/nixpkgs-review.swap
+          sudo mkswap /mnt/nixpkgs-review.swap
+          sudo swapon /mnt/nixpkgs-review.swap
+        fi
+
+        echo "::group::memory (after)"
+        free -h || true
+        swapon --show || true
+        echo "::endgroup::"
+
     - name: reclaim space (darwin)
       if: runner.os == 'macOS'
       shell: bash
