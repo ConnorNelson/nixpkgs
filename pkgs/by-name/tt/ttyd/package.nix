@@ -14,6 +14,17 @@
   nixosTests,
 }:
 
+let
+  libwebsockets' = libwebsockets.overrideAttrs (previousAttrs: {
+    # ttyd only uses server APIs; match its upstream libwebsockets build.
+    cmakeFlags = previousAttrs.cmakeFlags ++ [
+      (lib.cmakeBool "LWS_WITH_SOCKS5" false)
+      (lib.cmakeBool "LWS_WITHOUT_CLIENT" true)
+      (lib.cmakeBool "LWS_WITH_SECURE_STREAMS" false)
+    ];
+  });
+in
+
 stdenv.mkDerivation (finalAttrs: {
   pname = "ttyd";
   version = "1.7.7";
@@ -35,7 +46,7 @@ stdenv.mkDerivation (finalAttrs: {
   ];
   buildInputs = [
     openssl
-    libwebsockets
+    libwebsockets'
     json_c
     libuv
     zlib
