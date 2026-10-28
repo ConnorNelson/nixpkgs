@@ -1,0 +1,110 @@
+name: Kuna native aarch64-linux review
+
+on:
+  push:
+    branches: [kuna-native-arm-review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      EXPECTED_HEAD: ac419a6d7924706fb98c512a21e8125da40496a9
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - name: Verify native ARM runner
+        run: |
+          uname -a
+          test "$(uname -m)" = aarch64
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/kuna-review-cache" >> "$GITHUB_ENV"
+          df -h /
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b
+        with:
+          enable_kvm: false
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            sandbox = true
+            cores = 4
+            max-jobs = 1
+
+      - name: Review PR 579966 on aarch64-linux
+        id: review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/NixOS/nixpkgs/pulls/579966 > "$RUNNER_TEMP/pr.json"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          snapshot = Path(os.environ['RUNNER_TEMP']) / 'pr.json'
+          data = json.loads(snapshot.read_text())
+          assert data['head']['sha'] == os.environ['EXPECTED_HEAD']
+          root = Path('nixpkgs')
+          subprocess.run(['git', 'init', str(root)], check=True)
+          subprocess.run(['git', 'remote', 'add', 'origin', 'https://github.com/NixOS/nixpkgs.git'], cwd=root, check=True)
+          subprocess.run(['git', 'fetch', '--depth=1', 'origin', data['merge_commit_sha']], cwd=root, check=True)
+          subprocess.run(['git', 'checkout', '--detach', 'FETCH_HEAD'], cwd=root, check=True)
+          expr = 'let p = import ./. {}; in { build = p.stdenv.buildPlatform.system; host = p.stdenv.hostPlatform.system; installCheck = p.kuna.doInstallCheck; }'
+          platform = json.loads(subprocess.check_output(['nix-instantiate', '--eval', '--strict', '--json', '--expr', expr], cwd=root, text=True))
+          assert platform == {'build': 'aarch64-linux', 'host': 'aarch64-linux', 'installCheck': True}, platform
+          print(json.dumps(platform))
+          tool = subprocess.check_output(['nix-build', '-A', 'nixpkgs-review', '--no-out-link'], cwd=root, text=True).strip()
+          args = [tool + '/bin/nixpkgs-review', 'pr', '579966', '--eval', 'local', '--systems', 'aarch64-linux', '--tests', '--no-shell', '--no-pr-info', '--pr-json', snapshot.read_text(), '--num-eval-workers', '2', '--max-memory-size', '4096', '--option', 'cores', '4', '--option', 'max-jobs', '1']
+          results = Path(os.environ['RUNNER_TEMP']) / 'kuna-review-results'
+          results.mkdir(exist_ok=True)
+          (results / 'platform.json').write_text(json.dumps(platform, indent=2))
+          with (results / 'review.log').open('w') as log:
+              with subprocess.Popen(args, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
+                  for line in process.stdout:
+                      print(line, end='')
+                      log.write(line)
+                  code = process.wait()
+          raise SystemExit(code)
+          PY
+
+      - name: Save report and verify the install check
+        if: always()
+        env:
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os, shutil, subprocess
+          from pathlib import Path
+          root = Path(os.environ['XDG_CACHE_HOME']) / 'nixpkgs-review/pr-579966'
+          results = Path(os.environ['RUNNER_TEMP']) / 'kuna-review-results'
+          results.mkdir(exist_ok=True)
+          for name in ['report.md', 'report.json', 'derivations']:
+              source = root / name
+              if source.exists():
+                  shutil.copyfile(source, results / name)
+          if os.environ['REVIEW_OUTCOME'] != 'success':
+              raise SystemExit(0)
+          report = json.loads((results / 'report.json').read_text())
+          assert report['commit'] == os.environ['EXPECTED_HEAD']
+          result = report['result']['aarch64-linux']
+          assert result['failed'] == [] and [p['name'] for p in result['built']] == ['kuna'], result
+          drv = (root / 'derivations').read_text().strip().split('^', 1)[0]
+          with (results / 'kuna-build.log').open('w') as log:
+              subprocess.run(['nix', 'log', drv], stdout=log, stderr=subprocess.STDOUT, check=True)
+          build_log = (results / 'kuna-build.log').read_text()
+          assert 'Running phase: installCheckPhase' in build_log
+          assert 'functions: 1 ok, 0 failed' in build_log
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write((results / 'report.md').read_text())
+          print('Native aarch64-linux build and installCheckPhase passed.')
+          PY
+
+      - name: Upload review artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kuna-native-aarch64-linux-review
+          path: ${{ runner.temp }}/kuna-review-results
+          retention-days: 7
+          if-no-files-found: warn
